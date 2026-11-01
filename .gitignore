@@ -11,6 +11,9 @@
 !*.sv
 !*.svh
 
+# Exclude DUT (axis_fifo.sv) from VIP repository
+axis_fifo.sv
+
 # Vivado build / simulation / cache directories
 .Xil/
 xsim.dir/
