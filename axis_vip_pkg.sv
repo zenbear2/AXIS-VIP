@@ -3,21 +3,21 @@
 package axis_vip_pkg;
 
     // =========================================================================
-    // 1. Transaction: 封包資料結構、Random Constraint 與 Deep Copy
+    // 1. Transaction: Packet payload fields, random constraints, and deep copy
     // =========================================================================
     class axis_transaction;
         rand logic [31:0] data;
         rand logic [3:0]  keep;
         rand logic        last;
-        rand int          idle_cycles; // 兩筆傳輸之間的發送端閒置拍數
+        rand int          idle_cycles; // Sender idle cycles before driving transfer
 
-        // 基本合法性約束
+        // Default protocol validity constraints
         constraint c_default {
             idle_cycles inside {[0:3]};
             keep inside {4'b1111, 4'b0111, 4'b0011, 4'b0001};
         }
 
-        // Deep Copy：避免 Generator 重用同一個 Object Handle 造成覆寫 (必考第 7 題)
+        // Deep copy: Prevents object handle reuse corruption in Generator
         function axis_transaction copy();
             copy = new();
             copy.data        = this.data;
@@ -26,7 +26,7 @@ package axis_vip_pkg;
             copy.idle_cycles = this.idle_cycles;
         endfunction
 
-        // 比對兩筆 Transaction 是否相同
+        // Compare two transactions for equality
         function bit compare(axis_transaction rhs);
             return (this.data === rhs.data) &&
                    (this.keep === rhs.keep) &&
@@ -40,7 +40,7 @@ package axis_vip_pkg;
     endclass
 
     // =========================================================================
-    // 2. Generator: 產生 Random / Directed Transactions 並放入 Mailbox
+    // 2. Generator: Generates randomized transactions and puts copies into mailbox
     // =========================================================================
     class axis_generator;
         mailbox #(axis_transaction) gen2drv;
@@ -54,21 +54,21 @@ package axis_vip_pkg;
         task run();
             axis_transaction tr_template = new();
             for (int i = 0; i < num_trans; i++) begin
-                // 使用 inline constraint 控制最後一筆拉高 last
+                // Inline constraint to assert TLAST every 4 beats and on the final beat
                 if (!tr_template.randomize() with {
                     last == (i % 4 == 3 || i == num_trans - 1);
                 }) begin
                     $fatal(1, "[GEN] Randomize failed!");
                 end
 
-                // 【重要考點】必須放入 copy() 出來的新物件，不能直接 put(tr_template)
+                // Put a deep copy into the mailbox to avoid overwriting the same handle
                 gen2drv.put(tr_template.copy());
             end
         endtask
     endclass
-    
+
     // =========================================================================
-    // 3. Master Driver: 取出 Transaction，呼叫 Interface 的 Master BFM 驅動
+    // 3. Master Driver: Retrieves transactions and drives bus via Master BFM
     // =========================================================================
     class axis_master_driver;
         virtual axis_if vif;
@@ -90,7 +90,7 @@ package axis_vip_pkg;
     endclass
 
     // =========================================================================
-    // 4. Slave Driver: 呼叫 Interface 的 Slave BFM 產生隨機 Backpressure
+    // 4. Slave Driver: Generates random backpressure on TREADY via Slave BFM
     // =========================================================================
     class axis_slave_driver;
         virtual axis_if vif;
@@ -108,18 +108,18 @@ package axis_vip_pkg;
     endclass
 
     // =========================================================================
-    // 5. Functional Coverage: 收集封包欄位與交握狀態覆蓋率 (對應第 5 節)
+    // 5. Functional Coverage: Collects packet field and cross coverage
     // =========================================================================
     class axis_coverage;
         axis_transaction tr;
-        int              beat_cnt = 0; // 計算每個 Packet 包含幾個 beat (單 beat vs 多 beat)
+        int              beat_cnt = 0; // Tracks number of beats per packet
         int              pkt_len  = 0;
 
-        // 定義 Covergroup：檢查 keep、last、封包長度與 Cross Coverage
+        // Covergroup checking TKEEP patterns, TLAST position, and their cross product
         covergroup cg_axis_pkt;
             option.per_instance = 1;
 
-            // 1. 檢查有效的 Byte Enable 組合 (部分有效 byte vs 全部有效)
+            // 1. Valid byte-enable (TKEEP) patterns
             cp_keep : coverpoint tr.keep {
                 bins keep_1byte = {4'b0001};
                 bins keep_2byte = {4'b0011};
@@ -128,13 +128,13 @@ package axis_vip_pkg;
                 illegal_bins bad_keep = default;
             }
 
-            // 2. 檢查 TLAST (0: 封包中間 beat, 1: 封包結尾 beat)
+            // 2. Packet boundary indicator (TLAST)
             cp_last : coverpoint tr.last {
                 bins mid_beat  = {1'b0};
                 bins last_beat = {1'b1};
             }
 
-            // 3. 交叉覆蓋率 (Cross)：確認各種 keep 在封包中間與結尾都有測到
+            // 3. Cross coverage: Verify all TKEEP patterns occur on both mid and last beats
             cx_keep_last : cross cp_keep, cp_last;
         endgroup
 
@@ -142,7 +142,7 @@ package axis_vip_pkg;
             cg_axis_pkt = new();
         endfunction
 
-        // 提供 sample 函式，由 Monitor 或 Scoreboard 在收到交易時呼叫
+        // Sample method invoked by Monitor when a valid handshake occurs
         function void sample(axis_transaction t);
             this.tr = t;
             beat_cnt++;
@@ -159,13 +159,13 @@ package axis_vip_pkg;
     endclass
 
     // =========================================================================
-    // 6. Monitor: 呼叫 Interface 的 Monitor BFM 取樣，送往 SCB 並觸發 Coverage
+    // 6. Monitor: Samples completed handshakes via BFM, forwards to SCB & Coverage
     // =========================================================================
     class axis_monitor;
         string name;
         virtual axis_if vif;
         mailbox #(axis_transaction) mon2scb;
-        axis_coverage cov; // 掛載 Coverage 收集器 (Observer pattern 一對多通知)
+        axis_coverage cov; // Optional coverage collector (Observer pattern)
 
         function new(
             string                      name,
@@ -184,7 +184,7 @@ package axis_vip_pkg;
                 axis_transaction tr = new();
                 vif.monitor_sample(tr.data, tr.keep, tr.last);
                 mon2scb.put(tr);
-                // 若有掛載 Coverage 物件，同步取樣功能覆蓋率
+                // Trigger functional coverage sampling if attached
                 if (cov != null) begin
                     cov.sample(tr);
                 end
@@ -193,7 +193,7 @@ package axis_vip_pkg;
     endclass
 
     // =========================================================================
-    // 7A. Scoreboard (基底類別 - 純 Mailbox 版): 搭配 try_get() 非阻塞取樣比對
+    // 7A. Scoreboard (Base Class - Mailbox Version): Uses non-blocking try_get()
     // =========================================================================
     class axis_scoreboard;
         mailbox #(axis_transaction) exp_mbx;
@@ -206,7 +206,7 @@ package axis_vip_pkg;
             this.act_mbx = act_mbx;
         endfunction
 
-        // 使用 virtual method 支援多型覆寫 (對應 3.2 節繼承與多型)
+        // Virtual method supporting polymorphic override on mid-stream reset
         virtual function void reset_flush();
             axis_transaction tmp;
             while (exp_mbx.try_get(tmp));
@@ -235,7 +235,7 @@ package axis_vip_pkg;
     endclass
 
     // =========================================================================
-    // 7B. Scoreboard (獨立單一 Queue 版): 繼承自 axis_scoreboard，改用 exp_q[$]
+    // 7B. Scoreboard (Derived Queue Version): Uses SystemVerilog queue exp_q[$]
     // =========================================================================
     class axis_scoreboard_queue extends axis_scoreboard;
         axis_transaction exp_q[$];
@@ -244,22 +244,22 @@ package axis_vip_pkg;
             super.new(exp_mbx, act_mbx);
         endfunction
 
-        // 覆寫 (Override) Reset 清空方法：Queue 只需一行 delete() (必考第 5 題)
+        // Override reset flush: Clear all pending expected items in a single call
         virtual function void reset_flush();
             exp_q.delete();
         endfunction
 
-        // 覆寫 (Override) run()：使用 Queue push_back / pop_front 比對
+        // Override run(): Use push_back() and pop_front() on exp_q[$]
         virtual task run();
             fork
-                // 執行緒 1：從 IN_MON 收期望封包，推入 exp_q 尾端
+                // Thread 1: Collect expected transactions from input monitor into exp_q
                 forever begin
                     axis_transaction exp_tr;
                     exp_mbx.get(exp_tr);
                     exp_q.push_back(exp_tr);
                 end
 
-                // 執行緒 2：每當 OUT_MON 收到實際輸出，從 exp_q 前端取出比對
+                // Thread 2: Compare actual output transactions against front of exp_q
                 forever begin
                     axis_transaction exp_tr, act_tr;
                     act_mbx.get(act_tr);
@@ -287,19 +287,19 @@ package axis_vip_pkg;
     endclass
 
     // =========================================================================
-    // 8. Agent: 封裝 Generator / Driver / Monitor / Coverage，支援 Active / Passive (必考第 10 題)
+    // 8. Agent: Encapsulates Gen / Driver / Monitor / Coverage with Active/Passive mode
     // =========================================================================
     class axis_agent;
         string name;
-        bit    is_active; // 1: Active (產生激勵 + 監聽), 0: Passive (僅被動監聽)
-        bit    is_master; // 1: Master 端角色, 0: Slave 端角色
+        bit    is_active; // 1: Active (Drives + Monitors), 0: Passive (Monitors only)
+        bit    is_master; // 1: Master role, 0: Slave role
         int    num_trans;
 
         axis_generator     gen;
         axis_master_driver mst_drv;
         axis_slave_driver  slv_drv;
-        axis_monitor       mon;     // 無論 Active/Passive 或 Master/Slave 皆共用同一個 Monitor！
-        axis_coverage      cov;     // 功能覆蓋率收集器
+        axis_monitor       mon;     // Shared across both Active/Passive and Master/Slave modes
+        axis_coverage      cov;     // Functional coverage collector
 
         mailbox #(axis_transaction) gen2drv;
 
@@ -316,11 +316,11 @@ package axis_vip_pkg;
             this.is_master = is_master;
             this.num_trans = num_trans;
 
-            // Monitor 與 Coverage 在 Active 與 Passive 模式下皆會建立 (共用元件)
+            // Monitor and Coverage are always instantiated in both Active and Passive modes
             cov = new();
             mon = new({name, "_MON"}, vif, mon2scb, cov);
 
-            // 只有 Active 模式 (is_active == 1) 才會建立 Driver 與 Generator
+            // Driver and Generator are only instantiated in Active mode (is_active == 1)
             if (is_active) begin
                 if (is_master) begin
                     gen2drv = new();
@@ -350,12 +350,12 @@ package axis_vip_pkg;
     endclass
 
     // =========================================================================
-    // 9. Environment: 建立 Master/Slave Agent 與 Scoreboard，管理啟動與排空結束
+    // 9. Environment: Instantiates Agents and Scoreboard, manages execution & drain
     // =========================================================================
     class axis_env;
-        axis_agent      s_agt; // Master Agent (接 s_axis)
-        axis_agent      m_agt; // Slave Agent  (接 m_axis)
-        axis_scoreboard scb;   // 父類別 Handle (可指向 axis_scoreboard 或子類別 axis_scoreboard_queue！)
+        axis_agent      s_agt; // Master Agent (connected to s_axis)
+        axis_agent      m_agt; // Slave Agent  (connected to m_axis)
+        axis_scoreboard scb;   // Base class handle (supports polymorphic assignment)
 
         mailbox #(axis_transaction) in_mon2scb;
         mailbox #(axis_transaction) out_mon2scb;
@@ -369,12 +369,12 @@ package axis_vip_pkg;
             in_mon2scb  = new();
             out_mon2scb = new();
 
-            // 建立 Master Active Agent (is_active = 1, is_master = 1)
+            // Instantiate Master Active Agent (is_active = 1, is_master = 1)
             s_agt = new("S_AGT", s_vif, in_mon2scb,  1'b1, 1'b1, num_trans);
-            // 建立 Slave Active Agent  (is_active = 1, is_master = 0)
+            // Instantiate Slave Active Agent  (is_active = 1, is_master = 0)
             m_agt = new("M_AGT", m_vif, out_mon2scb, 1'b1, 1'b0);
 
-            // 展示 OOP 多型 (Polymorphism)：父類別 handle scb 可動態決定實例化哪一種 Scoreboard
+            // Polymorphism: Base handle scb can point to either Queue or Mailbox Scoreboard
             if (use_queue_scb) begin
                 axis_scoreboard_queue q_scb = new(in_mon2scb, out_mon2scb);
                 scb = q_scb;
@@ -384,14 +384,14 @@ package axis_vip_pkg;
         endfunction
 
         task run();
-            // 啟動兩個 Agent 與 Scoreboard 背景程序 (fork...join_none)
+            // Spawn all VIP component threads in the background
             fork
                 s_agt.run();
                 m_agt.run();
-                scb.run(); // 多型呼叫：若 scb 指向 axis_scoreboard_queue，就會執行 Queue 版的 run()！
+                scb.run();
             join_none
 
-            // 等待所有交易皆從 DUT 流出並比對完畢 (Drain condition，必考第 8 題)
+            // Wait until all expected transactions have been drained and verified
             wait ((scb.match_count + scb.err_count) == s_agt.num_trans);
         endtask
     endclass

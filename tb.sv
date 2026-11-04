@@ -84,7 +84,7 @@ module tb;
         $finish;
     end
 
-    // Timeout Watchdog (避免 Handshake 死鎖永久等待，對應 3.2 節)
+    // Timeout Watchdog (Prevents infinite simulation hang on handshake deadlock)
     initial begin
         #100000; // 100 us timeout
         if (!test_done) begin
